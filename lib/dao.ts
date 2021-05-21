@@ -178,6 +178,10 @@ export class DynamoDao<T, K extends Indexable<T>, S extends Exclude<Indexable<T>
         return this.serializer.serializeField(field as any, value)!
     }
 
+    private typeOf<U extends K|S|I>(field: U): (keyof DynamoDB.AttributeValue) {
+        return this.serializer.typeOf(field as any)!;
+    }
+
     private attributeValues<U extends I|S, M extends Matcher>(condition: Condition<T, U, M>): ExpressionAttributeValueMap {
         const between = condition as Condition<T, U, "between">;
         const notBetween = condition as Condition<T, U, Exclude<M, "between">>;
@@ -189,13 +193,12 @@ export class DynamoDao<T, K extends Indexable<T>, S extends Exclude<Indexable<T>
         };
     }
 
-    // support numbers and strings for indexes and primary keys
     private buildTableSpec(throughput: DynamoDB.ProvisionedThroughput): DynamoDB.CreateTableInput {
         return {
             AttributeDefinitions: [
-                {AttributeName: this.primaryKey as string, AttributeType: "S"},
-                {AttributeName: this.sortKey as string, AttributeType: "S"},
-            ].concat(this.indexes.map((index) => ({AttributeName: index as string, AttributeType: "S"}))),
+                {AttributeName: this.primaryKey as string, AttributeType: this.typeOf(this.primaryKey)},
+                {AttributeName: this.sortKey as string, AttributeType: this.typeOf(this.sortKey)},
+            ].concat(this.indexes.map((index) => ({AttributeName: index as string, AttributeType: this.typeOf(index)}))),
             KeySchema: [
                 {AttributeName: this.primaryKey as string, KeyType: "HASH"},
                 {AttributeName: this.sortKey as string, KeyType: "RANGE"},

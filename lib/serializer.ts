@@ -12,6 +12,7 @@ type DynamoType<K extends keyof DynamoDB.AttributeValue> = NonNullable<DynamoDB.
 type DynamoRecord<K extends keyof DynamoDB.AttributeValue> = Record<K, DynamoType<K>>;
 
 interface IDynamoSerializer<T, K extends keyof DynamoDB.AttributeValue> {
+    type: K
     deserialize: (value: DynamoRecord<K>) => T;
     serialize: (value: T) => DynamoRecord<K>;
 }
@@ -30,14 +31,14 @@ class DynamoRawSerializer<T extends keyof DynamoDB.AttributeValue>
     public static readonly string = new DynamoRawSerializer("S");
     public static readonly stringSet = new DynamoRawSerializer("SS");
 
-    constructor(private key: T) {
+    constructor(public type: T) {
     }
 
     public deserialize(value: DynamoRecord<T>): DynamoType<T> {
-        return value[this.key];
+        return value[this.type];
     }
     public serialize(value: DynamoType<T>): DynamoRecord<T> {
-        return {[this.key]: value} as DynamoRecord<T>;
+        return {[this.type]: value} as DynamoRecord<T>;
     }
 }
 
@@ -50,11 +51,13 @@ export class DynamoSerializer<T> implements IDynamoSerializer<T, "M"> {
     public static readonly boolean = (): IDynamoSerializer<boolean, "BOOL"> => DynamoRawSerializer.boolean;
 
     public static readonly buffer = (): IDynamoSerializer<Buffer, "S"> => ({
+        type: "S",
         deserialize: (value) => Buffer.from(DynamoRawSerializer.string.deserialize(value), "hex"),
         serialize: (value) => DynamoRawSerializer.string.serialize(value.toString("hex")),
     })
 
     public static readonly date = (): IDynamoSerializer<Date, "N"> => ({
+        type: "N",
         deserialize: (value) => new Date(DynamoSerializer.number().deserialize(value)),
         serialize: (value) => DynamoSerializer.number().serialize(value.getTime()),
     })
@@ -63,6 +66,7 @@ export class DynamoSerializer<T> implements IDynamoSerializer<T, "M"> {
             IDynamoSerializer<T, "S"> => DynamoRawSerializer.string as any
 
     public static list = <T>(serializer: IDynamoSerializer<T, any>): IDynamoSerializer<T[], "L"> => ({
+        type: "L",
         deserialize: (value) => DynamoRawSerializer.list.deserialize(value)
             .map((item) => serializer.deserialize(item)),
         serialize: (value) => DynamoRawSerializer.list.serialize(value
@@ -70,11 +74,13 @@ export class DynamoSerializer<T> implements IDynamoSerializer<T, "M"> {
     })
 
     public static readonly number = (): IDynamoSerializer<number, "N"> => ({
+        type: "N",
         deserialize: (value) => Number(DynamoRawSerializer.number.deserialize(value)),
         serialize: (value) => DynamoRawSerializer.number.serialize(String(value)),
     })
 
     public static readonly optional = <T> (serializer: IDynamoSerializer<T, any>): IDynamoSerializer<T | undefined, any> => ({
+        type: "NULL",
         deserialize: (value) => value === undefined || DynamoRawSerializer.null.deserialize(value) ? undefined : serializer.deserialize(value),
         serialize: (value) => value === undefined ? DynamoRawSerializer.null.serialize(true) : serializer.serialize(value),
     })
@@ -87,6 +93,7 @@ export class DynamoSerializer<T> implements IDynamoSerializer<T, "M"> {
         return value === undefined ? target: Object.assign(target, {[key]: value});
     }
 
+    public readonly type = "M";
     private readonly serializers: DynamoSerializers<T>;
 
     // Note: the define callback allows to enforce strict typing and prevent the definition of serializers that don't have matching properties
@@ -108,13 +115,15 @@ export class DynamoSerializer<T> implements IDynamoSerializer<T, "M"> {
     }
 
     public serializeField<F extends Field<T>>(field: F, value: T[F]): DynamoDB.AttributeValue | undefined {
-        const serializer = this.serializers[field];
-        return serializer?.serialize(value);
+        return this.serializers[field]?.serialize(value);
     }
 
     public deserializeField<F extends Field<T>>(field: F, value: DynamoDB.AttributeValue): T[F] | undefined {
-        const serializer = this.serializers[field];
-        return serializer?.deserialize(value);
+        return this.serializers[field]?.deserialize(value);
+    }
+
+    public typeOf<F extends Field<T>>(field: F): keyof DynamoDB.AttributeValue | undefined {
+        return this.serializers[field]?.type;
     }
 
     private get fields(): Field<T>[] {
