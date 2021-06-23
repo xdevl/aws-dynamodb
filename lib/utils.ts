@@ -5,6 +5,11 @@
  * For a copy, see <https://opensource.org/licenses/MIT>.
  */
 
+export type Type<T> = (t: T) => void
+
+// eslint-disable-next-line @typescript-eslint/no-empty-function
+export const typeOf = <T> (): Type<T> => (t: T) => {}
+
 type FilterFields<T, F> = {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     [K in keyof T]: T[K] extends (...args: any) => any ? never : T[K] extends F ? K : never

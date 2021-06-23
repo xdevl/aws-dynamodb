@@ -1,6 +1,6 @@
 import {DynamoDao} from "../lib/dao";
 import {DynamoSerializer} from "../lib/serializer";
-import {collect, Initializer, generator} from "../lib/utils";
+import {collect, Initializer, generator, typeOf} from "../lib/utils";
 
 class Product {
 
@@ -15,7 +15,7 @@ class Product {
     }
 }
 
-const productSerializer = new DynamoSerializer<Product>((define) => define({
+const productSerializer = new DynamoSerializer(typeOf<Product>(), () => ({
     type: DynamoSerializer.string(),
     code: DynamoSerializer.number(),
     price: DynamoSerializer.number()

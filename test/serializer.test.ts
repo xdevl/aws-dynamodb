@@ -1,5 +1,5 @@
 import {DynamoSerializer} from "../lib/serializer";
-import {Initializer} from "../lib/utils";
+import {Initializer, typeOf} from "../lib/utils";
 
 enum Gender {
     MALE = "MALE", FEMALE = "FEMALE"
@@ -23,7 +23,7 @@ class User {
     }
 }
 
-const userSerializer = new DynamoSerializer<User>((define, self) => define({
+const userSerializer = new DynamoSerializer(typeOf<User>(), (self) => ({
     surname: DynamoSerializer.string(),
     firstNames: DynamoSerializer.list(DynamoSerializer.string()),
     dateOfBirth: DynamoSerializer.date(),

@@ -6,18 +6,18 @@
  */
 
 import {DynamoDB} from "aws-sdk";
-import {Field, Initializer} from "./utils";
+import {Field, Initializer, Type, typeOf} from "./utils";
 
 type DynamoType<K extends keyof DynamoDB.AttributeValue> = NonNullable<DynamoDB.AttributeValue[K]>;
 type DynamoRecord<K extends keyof DynamoDB.AttributeValue> = Record<K, DynamoType<K>>;
 
-interface IDynamoSerializer<T, K extends keyof DynamoDB.AttributeValue> {
+export interface IDynamoSerializer<T, K extends keyof DynamoDB.AttributeValue> {
     type: K
     deserialize: (value: DynamoRecord<K>) => T;
     serialize: (value: T) => DynamoRecord<K>;
 }
 
-class DynamoRawSerializer<T extends keyof DynamoDB.AttributeValue>
+export class DynamoRawSerializer<T extends keyof DynamoDB.AttributeValue>
         implements IDynamoSerializer<DynamoType<T>, T> {
 
     public static readonly binary = new DynamoRawSerializer("B");
@@ -46,7 +46,8 @@ type DynamoSerializers<T> = {
     [P in Field<T>]: IDynamoSerializer<T[P], any> | undefined;
 };
 
-export class DynamoSerializer<T> implements IDynamoSerializer<T, "M"> {
+// TODO: enhance error messages, ie: when a field fails to serialize / deserialize log its name and potentially dump the whole payload
+export class DynamoSerializer<T, S extends DynamoSerializers<T>> implements IDynamoSerializer<T, "M"> {
 
     public static readonly boolean = (): IDynamoSerializer<boolean, "BOOL"> => DynamoRawSerializer.boolean;
 
@@ -94,12 +95,10 @@ export class DynamoSerializer<T> implements IDynamoSerializer<T, "M"> {
     }
 
     public readonly type = "M";
-    private readonly serializers: DynamoSerializers<T>;
+    public readonly serializers: DynamoSerializers<T>;
 
-    // Note: the define callback allows to enforce strict typing and prevent the definition of serializers that don't have matching properties
-    constructor(serializers: (define: (serializers: DynamoSerializers<T>) => DynamoSerializers<T>, self: DynamoSerializer<T>) => DynamoSerializers<T>,
-                private readonly factory: (attrs: Initializer<T>) => T) {
-        this.serializers = serializers((values) => values, this);
+    constructor(type: Type<T>, serializers: (self: DynamoSerializer<T, any>) => S, private readonly factory: (attrs: Initializer<T>) => T) {
+        this.serializers = serializers(this);
     }
 
     public serialize(entity: T): DynamoRecord<"M"> {

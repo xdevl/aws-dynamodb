@@ -6,7 +6,7 @@
  */
 
 import {DynamoDB} from "aws-sdk";
-import {Initializer, map} from "./utils";
+import {Initializer, map, typeOf} from "./utils";
 import {DynamoDao} from "./dao";
 import {DynamoSerializer} from "./serializer";
 
@@ -31,14 +31,14 @@ class Entity<T> {
 
 export class EntityDao<T> {
 
-    private readonly dao: DynamoDao<Entity<T>, "ENTITY_TYPE", "ENTITY_ID", "ENTITY_LOOKUP">;
+    private readonly dao: DynamoDao<DynamoSerializer<Entity<T>, any>, "ENTITY_TYPE", "ENTITY_ID", "ENTITY_LOOKUP">;
 
     constructor(private readonly dynamoDb: DynamoDB, private readonly entityType: string,
                 private readonly id: (value: T) => string, private readonly lookup: (value: T) => string,
-                tableName: string, serializer: DynamoSerializer<T>) {
+                tableName: string, serializer: DynamoSerializer<T, any>) {
 
         this.dao = new DynamoDao(tableName, "ENTITY_TYPE", "ENTITY_ID", ["ENTITY_LOOKUP"],
-            new DynamoSerializer<Entity<any>> ((define) => define({
+            new DynamoSerializer (typeOf<Entity<any>>(), () => ({
                 ENTITY_ID: DynamoSerializer.string(),
                 ENTITY_LOOKUP: DynamoSerializer.string(),
                 ENTITY_TYPE: DynamoSerializer.string(),
@@ -71,7 +71,7 @@ export class EntityDao<T> {
     }
 
     public static synchronise(tableName: string, dynamoDb: DynamoDB, throughput?: DynamoDB.ProvisionedThroughput): Promise<void> {
-        return new DynamoDao(tableName, "ENTITY_TYPE", "ENTITY_ID", ["ENTITY_LOOKUP"], undefined as unknown as DynamoSerializer<Entity<any>>)
+        return new DynamoDao(tableName, "ENTITY_TYPE", "ENTITY_ID", ["ENTITY_LOOKUP"], undefined as unknown as DynamoSerializer<Entity<any>, any>)
             .createTableIfNeeded(dynamoDb, throughput || {
                 ReadCapacityUnits: 1,
                 WriteCapacityUnits: 1,
