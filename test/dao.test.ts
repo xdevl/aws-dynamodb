@@ -21,7 +21,7 @@ const productSerializer = new DynamoSerializer(typeOf<Product>(), () => ({
     price: DynamoSerializer.number()
 }), (attrs) => new Product(attrs));
 
-const dao = new DynamoDao("ProductTable", "type", "code", ["price"], productSerializer);
+const dao = new DynamoDao("ProductTable", productSerializer, ["type", "code"]);
 
 const dynamock = <T extends string>(name: T, result?: any) =>
     ({[name]: jest.fn(() => ({promise: () => Promise.resolve(result)}))} as Record<T, jest.Mock>);
@@ -47,7 +47,6 @@ test("Can persist", async () => {
                         Item: { type: {S: "chicken"}, code: {N: "2"}, price: {N: "7"} }
                     }
                 }
-                
             ]
         }
     });
@@ -75,7 +74,30 @@ test("Can lookup with condition", async () => {
     const mock = dynamock("query", {});
 
     const values = await collect(dao.lookup(mock as any, "cheese", {
-        condition: {key: "price", matcher: "<", value: 0}
+        condition: {matcher: "<", value: 0}
+    }));
+
+    expect(values).toStrictEqual([]);
+    expect(mock.query).toBeCalledWith({
+        ExpressionAttributeNames: {
+            "#pk": "type",
+            "#sk": "code"
+        },
+        ExpressionAttributeValues: {
+            ":pk": {"S": "cheese"},
+            ":value": {"N": "0"}
+        },
+        KeyConditionExpression: "#pk = :pk and #sk < :value",
+        TableName: "ProductTable",
+    });    
+});
+
+test("Can lookup index", async () => {
+    const mock = dynamock("query", {});
+    const priceIndex = dao.localIndex("priceIndex", "price");
+
+    const values = await collect(priceIndex.lookup(mock as any, "cheese", {
+        condition: {matcher: "between", value: [5, 10]}
     }));
 
     expect(values).toStrictEqual([]);
@@ -86,10 +108,11 @@ test("Can lookup with condition", async () => {
         },
         ExpressionAttributeValues: {
             ":pk": {"S": "cheese"},
-            ":value": {"N": "0"}
+            ":from": {"N": "5"},
+            ":to": {"N": "10"}
         },
-        IndexName: "price",
-        KeyConditionExpression: "#pk = :pk and #sk < :value",
+        IndexName: "priceIndex",
+        KeyConditionExpression: "#pk = :pk and #sk between :from and :to",
         TableName: "ProductTable",
     });    
 });
@@ -97,7 +120,7 @@ test("Can lookup with condition", async () => {
 test("Can get", async () => {
     const mock = dynamock("getItem", {});
 
-    const value = await dao.get(mock as any, "tomatoe", 64);
+    const value = await dao.get(mock as any, ["tomatoe", 64]);
 
     expect(value).toBeUndefined();
     expect(mock.getItem).toBeCalledWith({

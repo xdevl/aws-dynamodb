@@ -5,10 +5,12 @@
  * For a copy, see <https://opensource.org/licenses/MIT>.
  */
 
-export type Type<T> = (t: T) => void
+export type Type<T> = (t: T) => void;
 
 // eslint-disable-next-line @typescript-eslint/no-empty-function
-export const typeOf = <T> (): Type<T> => (t: T) => {}
+export const typeOf = <T> (): Type<T> => (t: T) => {};
+
+export type IsStrictlyAny<T> = T extends never ? true : false;
 
 type FilterFields<T, F> = {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any

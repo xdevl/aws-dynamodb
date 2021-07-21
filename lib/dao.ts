@@ -6,9 +6,11 @@
  */
 
 import {DynamoDB} from "aws-sdk";
-import {Field} from "./utils";
+import {Field, IsStrictlyAny} from "./utils";
 import {DynamoSerializer, IDynamoSerializer} from "./serializer";
 import { ExpressionAttributeValueMap, QueryInput, QueryOutput, ScanInput, ScanOutput} from "aws-sdk/clients/dynamodb";
+
+const arrayable = <T>(value: T | T[]): T[] => value instanceof Array ? value : [value];
 
 async function *chunksOf<T>(values: AsyncGenerator<T>, chunkSize: number): AsyncGenerator<T[]> {
     let chunk = [];
@@ -22,12 +24,20 @@ async function *chunksOf<T>(values: AsyncGenerator<T>, chunkSize: number): Async
     yield chunk;
 }
 
+type SerializedType<T extends DynamoSerializer<any, any>> = T extends DynamoSerializer<infer T, any> ? T : never;
+type SerializerType<T extends DynamoSerializer<any, any>> = T extends DynamoSerializer<any, infer T> ? T : never;
+type Indexable<T extends DynamoSerializer<any, any>> = keyof SerializedType<T> & Field<SerializerType<T>, IDynamoSerializer<any, "S"> | IDynamoSerializer<any, "N">>;
+type SortKeySpec<T extends DynamoSerializer<any, any>, PK extends Indexable<T>> = IsStrictlyAny<PK> extends false ? Exclude<Indexable<T>, PK> : Indexable<T>;
+type KeySpec<T extends DynamoSerializer<any, any>, PK extends Indexable<T>, SK extends SortKeySpec<T, PK>> = PK | [PK, SK];
+// see: https://stackoverflow.com/questions/53984650/typescript-never-type-inconsistently-matched-in-conditional-type
+type KeyType<T extends DynamoSerializer<any, any>, PK extends Indexable<T>, SK extends SortKeySpec<T, PK>> = [SK] extends [never] ? SerializedType<T>[PK] : [SerializedType<T>[PK], SerializedType<T>[SK]];
+
+
 type Matcher = "=" | "<" | "<=" | ">" | ">=" | "between" | "begins_with";
 
-interface Condition<T extends DynamoSerializer<any, any>, PK extends Indexable<T>, M extends Matcher> {
-    key: PK;
+interface Condition<T extends DynamoSerializer<any, any>, K extends Indexable<T>, M extends Matcher> {
     matcher: M;
-    value: M extends "between" ? [SerializedType<T>[PK], SerializedType<T>[PK]] : SerializedType<T>[PK];
+    value: M extends "between" ? [SerializedType<T>[K], SerializedType<T>[K]] : SerializedType<T>[K];
 }
 
 const conditionToString = (matcher: Matcher, name: string) => {
@@ -40,44 +50,110 @@ const conditionToString = (matcher: Matcher, name: string) => {
     }
 }
 
-type SerializedType<T extends DynamoSerializer<any, any>> = T extends DynamoSerializer<infer T, any> ? T : never;
-type SerializerType<T extends DynamoSerializer<any, any>> = T extends DynamoSerializer<any, infer T> ? T : never;
-type Indexable<T extends DynamoSerializer<any, any>> = keyof SerializedType<T> & Field<SerializerType<T>, IDynamoSerializer<any, "S"> | IDynamoSerializer<any, "N">>;
-
-interface Key<T extends DynamoSerializer<any, any>, PK extends Indexable<T>, SK extends Exclude<Indexable<T>, PK>> {
-    primaryKey: SerializedType<T>[PK],
-    sortKey: SerializedType<T>[SK]
+interface BaseOptions<T> {
+    overwrite?: (input: T) => T,
+    limit?: number,
+    startFrom?: any
 }
 
-interface KeyWithIndex<T extends DynamoSerializer<any, any>, PK extends Indexable<T>, SK extends Exclude<Indexable<T>, PK>,
-    I extends Exclude<Indexable<T>, PK | SK>> extends Key<T, PK, SK> {
-    index: SerializedType<T>[I]
+type ListOptions = BaseOptions<ScanInput>
+
+interface LookupOptions<T extends DynamoSerializer<any, any>, K extends Indexable<T>, M extends Matcher> extends BaseOptions<QueryInput> {
+    condition?: Condition<T, K, M>
 }
 
-interface ListOptions<T extends DynamoSerializer<any, any>, PK extends Indexable<T>, SK extends Exclude<Indexable<T>, PK>,
-    I extends Exclude<Indexable<T>, PK | SK>, U extends I|void> {
-    index?: U,
-    startFrom?: U extends I ?  KeyWithIndex<T, PK, SK, U> : Key<T, PK, SK>,
-    overwrite?: (input: ScanInput) => ScanInput,
+enum IndexType {
+    LOCAL, GLOBAL
 }
 
+export class DynamoIndex<T extends DynamoSerializer<any, any>, PK extends Indexable<T>, SK extends SortKeySpec<T, PK>> {
 
-interface LookupOptions<T extends DynamoSerializer<any, any>, PK extends Indexable<T>, SK extends Exclude<Indexable<T>, PK>,
-        I extends Exclude<Indexable<T>, PK | SK>, U extends SK|I, M extends Matcher> {
-    condition?: Condition<T, U, M>
-    startFrom?: U extends I ? KeyWithIndex<T, PK, SK, U> : Key<T, PK, SK>,
-    overwrite?: (input: QueryInput) => QueryInput,
+    readonly keySchema: DynamoDB.KeySchema;
+
+    constructor(readonly tableName: string, readonly serializer: T, readonly keyspec: KeySpec<T, PK, SK>, readonly type = IndexType.GLOBAL, readonly name?: string) {
+        this.keySchema = arrayable(this.keyspec).map((name, index) => ({
+            AttributeName: name as string, KeyType: index == 0 ? "HASH" : "RANGE"
+        }));
+    }
+
+    public async *list(dynamoDb: DynamoDB, options?: ListOptions): AsyncGenerator<SerializedType<T>> {
+        const overwrite = options?.overwrite ?? ((params: ScanInput) => params);
+        yield *this.fetch(overwrite({
+            TableName: this.tableName,
+            IndexName: this.name,
+            ExclusiveStartKey: options?.startFrom,
+            Limit: options?.limit,
+        }), (params) => dynamoDb.scan(params).promise());
+    }
+
+    public async *lookup<M extends Matcher>(dynamoDb: DynamoDB, partitionKey: SerializedType<T>[PK], options?: LookupOptions<T, SK, M>): AsyncGenerator<SerializedType<T>> {
+        const overwrite = options?.overwrite ?? ((params: QueryInput) => params);
+        const pkCondition = "#pk = :pk";
+        yield *this.fetch(overwrite({
+            TableName: this.tableName,
+            IndexName: this.name,
+            ExclusiveStartKey: options?.startFrom,
+            Limit: options?.limit,
+            ExpressionAttributeNames: {
+                "#pk": this.partitionKey() as string,
+                ...(options?.condition ? {"#sk": this.sortKey() as string} : {})
+            },
+            ExpressionAttributeValues: {
+                ":pk":  this.serializeValue(this.partitionKey(), partitionKey),
+                ...(options?.condition ? this.attributeValues(options.condition) : {} )
+            },
+            KeyConditionExpression: options?.condition ? `${pkCondition} and ${conditionToString(options.condition.matcher, "#sk")}` : pkCondition,
+        }), (params) => dynamoDb.query(params).promise());
+    }
+
+    // TODO: add a callback to notify of LastEvaluatedKey
+    public async *fetch<P extends QueryInput|ScanInput>(params: P, callback: (params: P) => Promise<QueryOutput|ScanOutput>): AsyncGenerator<SerializedType<T>> {
+        const res = await callback(params);
+        const items = res.Items || [];
+        for(const item of items) {
+            yield this.serializer.deserialize({M: item});
+        }
+
+        console.log("LastEvaluatedKey: " + JSON.stringify(res.LastEvaluatedKey));
+        if (res.LastEvaluatedKey && (params.Limit == undefined || params.Limit > items.length)) {
+            yield *this.fetch({
+                ...params,
+                ExclusiveStartKey: res.LastEvaluatedKey,
+                Limit: params.Limit !== undefined ? params.Limit - items.length : undefined
+            }, callback);
+        }
+    }
+
+    protected serializeValue<U extends PK|SK>(field: U, value: SerializedType<T>[U]): DynamoDB.AttributeValue {
+        // TODO: Can we enforce this rather than using an assertion ?
+        return this.serializer.serializeField(field as any, value)!
+    }
+
+    private partitionKey(): PK {
+        return this.keyspec instanceof Array ? (this.keyspec as [PK, SK])[0] : (this.keyspec as PK);
+    }
+
+    private sortKey(): SK {
+        return (this.keyspec as [PK, SK])[1];
+    }
+
+    private attributeValues<M extends Matcher>(condition: Condition<T, SK, M>): ExpressionAttributeValueMap {
+        const between = condition as Condition<T, SK, "between">;
+        const notBetween = condition as Condition<T, SK, Exclude<M, "between">>;
+        return condition.matcher === "between" ? {
+            ":from": this.serializeValue(this.sortKey(), between.value[0]),
+            ":to": this.serializeValue(this.sortKey(), between.value[1])
+        } : {
+            ":value": this.serializeValue(this.sortKey(), notBetween.value)
+        };
+    }
 }
 
+export class DynamoDao<T extends DynamoSerializer<any, any>, PK extends Indexable<T>, SK extends SortKeySpec<T, PK> = never>
+    extends DynamoIndex<T, PK, SK> {
 
-// TODO: should we allow primary keys ?
-export class DynamoDao<T extends DynamoSerializer<any, any>, PK extends Indexable<T>, SK extends Exclude<Indexable<T>, PK> , I extends Exclude<Indexable<T>, PK | SK>> {
-
-    constructor(private readonly tableName: string,
-                private readonly primaryKey: PK,
-                private readonly sortKey: SK,
-                private readonly indexes: I[],
-                private readonly serializer: T) {
+    constructor(tableName: string, serializer: T, keyspec: KeySpec<T, PK, SK>) {
+        super(tableName, serializer, keyspec);
     }
 
     public async persist(dynamoDb: DynamoDB, entities: AsyncGenerator<SerializedType<T>>): Promise<void> {
@@ -88,63 +164,27 @@ export class DynamoDao<T extends DynamoSerializer<any, any>, PK extends Indexabl
         }
     }
 
-    public async *list<U extends I|void = void>(dynamoDb: DynamoDB, options?: ListOptions<T, PK, SK, I, U>): AsyncGenerator<SerializedType<T>> {
-        const withIndex = options?.startFrom as KeyWithIndex<T, PK, SK, I>;
-        const overwrite = options?.overwrite ?? ((params: ScanInput) => params);
-        yield *this.fetch(overwrite({
-            TableName: this.tableName,
-            IndexName: options?.index as string,
-            ExclusiveStartKey: options?.startFrom ? {
-                [this.primaryKey]: this.serializeValue(this.primaryKey, options.startFrom.primaryKey),
-                [this.sortKey]: this.serializeValue(this.sortKey, options.startFrom.sortKey),
-                ...(options?.index ? {[options.index as string]: this.serializeValue(options.index as I, withIndex.index)} : {})
-            } : undefined
-        }), (params) => dynamoDb.scan(params).promise());
-    }
-
-    public async *lookup<U extends I|SK, M extends Matcher>(dynamoDb: DynamoDB, primaryKey: SerializedType<T>[PK], options?: LookupOptions<T, PK, SK, I, U, M>): AsyncGenerator<SerializedType<T>> {
-        const index = options?.condition && options.condition.key !== this.sortKey ? options.condition.key as I : undefined;
-        const withIndex = options?.startFrom as KeyWithIndex<T, PK, SK, I>;
-        const overwrite = options?.overwrite ?? ((params: ScanInput) => params);
-        const pkCondition = "#pk = :pk";
-        yield *this.fetch(overwrite({
-            ExpressionAttributeNames: {
-                "#pk": this.primaryKey as string,
-                ...(options?.condition ? {"#sk": options.condition.key as string} : {})
-            },
-            ExpressionAttributeValues: {
-                ":pk":  this.serializeValue(this.primaryKey, primaryKey),
-                ...(options?.condition ? this.attributeValues(options.condition) : {} )
-            },
-            KeyConditionExpression: options?.condition ? `${pkCondition} and ${conditionToString(options.condition.matcher, "#sk")}` : pkCondition,
-            ExclusiveStartKey: options?.startFrom ? {
-                [this.primaryKey]: this.serializeValue(this.primaryKey, options.startFrom.primaryKey),
-                [this.sortKey]: this.serializeValue(this.sortKey, options.startFrom.sortKey),
-                ...(index ? {[index as string]: this.serializeValue(index, withIndex.index)} : {})
-            } : undefined,
-            TableName: this.tableName,
-            ...(index ? {IndexName: index as string} : {})
-        }), (params) => dynamoDb.query(params).promise());
-    }
-
-    public async get(dynamoDb: DynamoDB, primaryKey: SerializedType<T>[PK], sortKey: SerializedType<T>[SK]): Promise<SerializedType<T>|undefined> {
-        const result = await dynamoDb.getItem({ Key: {
-            [this.primaryKey]: this.serializeValue(this.primaryKey, primaryKey),
-            [this.sortKey]: this.serializeValue(this.sortKey, sortKey),
-        }, TableName: this.tableName }).promise();
+    public async get(dynamoDb: DynamoDB, key: KeyType<T, PK, SK>): Promise<SerializedType<T>|undefined> {
+        const result = await dynamoDb.getItem({ Key: this.dynamoDbKey(key), TableName: this.tableName }).promise();
 
         return result.Item ? this.serializer.deserialize({M: result.Item}) : undefined;
     }
 
-    public async delete(dynamoDb: DynamoDB, primaryKey: SerializedType<T>[PK], sortKey: SerializedType<T>[SK]): Promise<void> {
-        await dynamoDb.deleteItem({ Key: {
-            [this.primaryKey]: this.serializeValue(this.primaryKey, primaryKey),
-            [this.sortKey]: this.serializeValue(this.sortKey, sortKey),
-        }, TableName: this.tableName}).promise();
+    public async delete(dynamoDb: DynamoDB, key: KeyType<T, PK, SK>): Promise<void> {
+        await dynamoDb.deleteItem({ Key: this.dynamoDbKey(key), TableName: this.tableName}).promise();
     }
 
-    public async createTableIfNeeded(dynamoDb: DynamoDB, throughput: DynamoDB.ProvisionedThroughput): Promise<void> {
-        const spec = this.buildTableSpec(throughput);
+    public localIndex<I extends SortKeySpec<T, PK>>(name: string, spec: I): DynamoIndex<T, PK, I>{
+        const pk = this.keyspec instanceof Array ? this.keyspec[0] : this.keyspec;
+        return new DynamoIndex(this.tableName, this.serializer, [pk, spec], IndexType.LOCAL, name);
+    }
+
+    public globalIndex<IPK extends Indexable<T>, ISK extends SortKeySpec<T, IPK> = never>(name: string, spec: KeySpec<T, IPK, ISK>): DynamoIndex<T, IPK, ISK> {
+        return new DynamoIndex(this.tableName, this.serializer, spec, IndexType.GLOBAL, name);
+    }
+
+    public async createTableIfNeeded(dynamoDb: DynamoDB, throughput: DynamoDB.ProvisionedThroughput, ...indexes: DynamoIndex<T, any, any>[]): Promise<void> {
+        const spec = this.buildTableSpec(throughput, ...indexes);
         const tableParam = {TableName: spec.TableName};
         try {
             const status = await dynamoDb.describeTable(tableParam).promise();
@@ -161,59 +201,35 @@ export class DynamoDao<T extends DynamoSerializer<any, any>, PK extends Indexabl
         await dynamoDb.waitFor("tableExists", tableParam).promise();
     }
 
-    public async *fetch<P extends QueryInput|ScanInput>(params: P, callback: (params: P) => Promise<QueryOutput|ScanOutput>): AsyncGenerator<SerializedType<T>> {
-        const res = await callback(params);
-        const items = res.Items || [];
-        for(const item of items) {
-            yield this.serializer.deserialize({M: item});
-        }
-
-        if (res.LastEvaluatedKey && (params.Limit == undefined || params.Limit > items.length)) {
-            yield *this.fetch({
-                ...params,
-                ExclusiveStartKey: res.LastEvaluatedKey,
-                Limit: params.Limit !== undefined ? params.Limit - items.length : undefined
-            }, callback);
-        }
+    private dynamoDbKey(key: KeyType<T, PK, SK>): DynamoDB.Key {
+        return arrayable(this.keyspec).reduce((acc, name, index) => Object.assign(acc, {[name]: this.serializeValue(name, arrayable(key)[index])}), {});
     }
 
-    private serializeValue<U extends PK|SK|I>(field: U, value: SerializedType<T>[U]): DynamoDB.AttributeValue {
-        // TODO: Can we enforce this rather than using an assertion ?
-        return this.serializer.serializeField(field as any, value)!
+    private typeOf(field: string): (keyof DynamoDB.AttributeValue) {
+        return this.serializer.typeOf(field)!;
     }
 
-    private typeOf<U extends PK|SK|I>(field: U): (keyof DynamoDB.AttributeValue) {
-        return this.serializer.typeOf(field as any)!;
-    }
-
-    private attributeValues<U extends I|SK, M extends Matcher>(condition: Condition<T, U, M>): ExpressionAttributeValueMap {
-        const between = condition as Condition<T, U, "between">;
-        const notBetween = condition as Condition<T, U, Exclude<M, "between">>;
-        return condition.matcher === "between" ? {
-            ":from": this.serializeValue(condition.key, between.value[0]),
-            ":to": this.serializeValue(condition.key, between.value[1])
-        } : {
-            ":value": this.serializeValue(condition.key, notBetween.value)
-        };
-    }
-
-    private buildTableSpec(throughput: DynamoDB.ProvisionedThroughput): DynamoDB.CreateTableInput {
+    public buildTableSpec(throughput: DynamoDB.ProvisionedThroughput, ...indexes: DynamoIndex<T, any, any>[]): DynamoDB.CreateTableInput {
+        const attributes = new Set<string>();
+        arrayable(this.keyspec).forEach((attribute) => attributes.add(attribute as string));
+        indexes.forEach((index) => arrayable(index.keyspec).forEach((attribute) => attributes.add(attribute as string)));
+        const localIndexes = indexes.filter((index) => index.type == IndexType.LOCAL);
+        const globalIndexes = indexes.filter((index) => index.type == IndexType.GLOBAL);
         return {
-            AttributeDefinitions: [
-                {AttributeName: this.primaryKey as string, AttributeType: this.typeOf(this.primaryKey)},
-                {AttributeName: this.sortKey as string, AttributeType: this.typeOf(this.sortKey)},
-            ].concat(this.indexes.map((index) => ({AttributeName: index as string, AttributeType: this.typeOf(index)}))),
-            KeySchema: [
-                {AttributeName: this.primaryKey as string, KeyType: "HASH"},
-                {AttributeName: this.sortKey as string, KeyType: "RANGE"},
-            ],
-            LocalSecondaryIndexes: this.indexes.length === 0 ? undefined : this.indexes.map((index) => ({
-                IndexName: index as string,
-                KeySchema: [
-                    {AttributeName: this.primaryKey as string, KeyType: "HASH"},
-                    {AttributeName: index as string, KeyType: "RANGE"},
-                ],
+            AttributeDefinitions: Array.from(attributes).map((key) => ({
+                AttributeName: key, AttributeType: this.typeOf(key)
+            })),
+            KeySchema: this.keySchema,
+            LocalSecondaryIndexes: localIndexes.length < 1 ? undefined : localIndexes.map((index) => ({
+                IndexName: index.name ?? arrayable(index.keyspec).join("_"),
+                KeySchema: index.keySchema,
+                Projection: { ProjectionType: "ALL" }
+            })),
+            GlobalSecondaryIndexes: globalIndexes.length < 1 ? undefined : globalIndexes.map((index) => ({
+                IndexName: index.name ?? arrayable(index.keyspec).join("_"),
+                KeySchema: index.keySchema,
                 Projection: { ProjectionType: "ALL" },
+                ProvisionedThroughput: throughput
             })),
             ProvisionedThroughput: throughput,
             TableName: this.tableName,
