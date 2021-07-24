@@ -23,11 +23,50 @@ const productSerializer = new DynamoSerializer(typeOf<Product>(), () => ({
 
 const dao = new DynamoDao("ProductTable", productSerializer, ["type", "code"]);
 
-const dynamock = <T extends string>(name: T, result?: any) =>
-    ({[name]: jest.fn(() => ({promise: () => Promise.resolve(result)}))} as Record<T, jest.Mock>);
+const dynamock = <T extends string>(name: T, ...values: any[]) => {
+    const mock = jest.fn();
+    values.forEach((value) => mock.mockReturnValueOnce({promise: () => Promise.resolve(value)}));
+    return { [name]: mock } as Record<T, jest.Mock>;
+}
+
+test("Can list", async () => {
+    const mock = dynamock("scan", {
+        Items: [
+            { type: {S: "soap"}, code: {N: "1"}, price: {N: "2.5"} },
+            { type: {S: "chicken"}, code: {N: "2"}, price: {N: "7"} }
+        ]
+    });
+
+    const values = await collect(dao.list(mock as any));
+
+    expect(values).toStrictEqual([
+        new Product({type: "soap", code: 1, price: 2.5}),
+        new Product({type: "chicken", code: 2, price: 7})
+    ]);
+});
+
+test("Can list chunked result", async () => {
+    const mock = dynamock("scan", {
+        Items: [
+            { type: {S: "soap"}, code: {N: "1"}, price: {N: "2.5"} },
+        ],
+        LastEvaluatedKey: {}
+    }, {
+        Items: [
+            { type: {S: "chicken"}, code: {N: "2"}, price: {N: "7"} }
+        ]
+    });
+
+    const values = await collect(dao.list(mock as any));
+
+    expect(values).toStrictEqual([
+        new Product({type: "soap", code: 1, price: 2.5}),
+        new Product({type: "chicken", code: 2, price: 7})
+    ]);
+});
 
 test("Can persist", async () => {
-    const mock = dynamock("batchWriteItem");
+    const mock = dynamock("batchWriteItem", {});
 
     await dao.persist(mock as any, generator(
         new Product({type: "soap", code: 1, price: 2.5}),

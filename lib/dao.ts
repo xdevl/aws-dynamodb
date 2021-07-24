@@ -8,7 +8,7 @@
 import {DynamoDB} from "aws-sdk";
 import {Field, IsStrictlyAny} from "./utils";
 import {DynamoSerializer, IDynamoSerializer} from "./serializer";
-import { ExpressionAttributeValueMap, QueryInput, QueryOutput, ScanInput, ScanOutput} from "aws-sdk/clients/dynamodb";
+import {ExpressionAttributeValueMap, QueryInput, QueryOutput, ScanInput, ScanOutput} from "aws-sdk/clients/dynamodb";
 
 const arrayable = <T>(value: T | T[]): T[] => value instanceof Array ? value : [value];
 
@@ -53,6 +53,7 @@ const conditionToString = (matcher: Matcher, name: string) => {
 interface BaseOptions<T> {
     overwrite?: (input: T) => T,
     limit?: number,
+    onMore?: (resumeToken: any) => void,
     startFrom?: any
 }
 
@@ -83,7 +84,7 @@ export class DynamoIndex<T extends DynamoSerializer<any, any>, PK extends Indexa
             IndexName: this.name,
             ExclusiveStartKey: options?.startFrom,
             Limit: options?.limit,
-        }), (params) => dynamoDb.scan(params).promise());
+        }), (params) => dynamoDb.scan(params).promise(), options?.onMore);
     }
 
     public async *lookup<M extends Matcher>(dynamoDb: DynamoDB, partitionKey: SerializedType<T>[PK], options?: LookupOptions<T, SK, M>): AsyncGenerator<SerializedType<T>> {
@@ -103,24 +104,29 @@ export class DynamoIndex<T extends DynamoSerializer<any, any>, PK extends Indexa
                 ...(options?.condition ? this.attributeValues(options.condition) : {} )
             },
             KeyConditionExpression: options?.condition ? `${pkCondition} and ${conditionToString(options.condition.matcher, "#sk")}` : pkCondition,
-        }), (params) => dynamoDb.query(params).promise());
+        }), (params) => dynamoDb.query(params).promise(), options?.onMore);
     }
 
-    // TODO: add a callback to notify of LastEvaluatedKey
-    public async *fetch<P extends QueryInput|ScanInput>(params: P, callback: (params: P) => Promise<QueryOutput|ScanOutput>): AsyncGenerator<SerializedType<T>> {
-        const res = await callback(params);
+    
+    public async *fetch<P extends QueryInput|ScanInput>(params: P, operation: (params: P) => Promise<QueryOutput|ScanOutput>,
+            // eslint-disable-next-line @typescript-eslint/no-empty-function
+            onMore: (resumeToken: any) => void = () => {}): AsyncGenerator<SerializedType<T>> {
+        const res = await operation(params);
         const items = res.Items || [];
         for(const item of items) {
             yield this.serializer.deserialize({M: item});
         }
 
-        console.log("LastEvaluatedKey: " + JSON.stringify(res.LastEvaluatedKey));
-        if (res.LastEvaluatedKey && (params.Limit == undefined || params.Limit > items.length)) {
-            yield *this.fetch({
-                ...params,
-                ExclusiveStartKey: res.LastEvaluatedKey,
-                Limit: params.Limit !== undefined ? params.Limit - items.length : undefined
-            }, callback);
+        if (res.LastEvaluatedKey) {
+            if (params.Limit == undefined || params.Limit > items.length) {
+                yield *this.fetch({
+                    ...params,
+                    ExclusiveStartKey: res.LastEvaluatedKey,
+                    Limit: params.Limit !== undefined ? params.Limit - items.length : undefined
+                }, operation);
+            } else {
+                onMore(res.LastEvaluatedKey);
+            }
         }
     }
 
