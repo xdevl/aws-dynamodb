@@ -125,6 +125,13 @@ export class DynamoSerializer<T, S extends DynamoSerializers<T>> implements IDyn
         return this.serializers[field]?.type;
     }
 
+    public subSerializer<P extends Field<T>>(keys: P[]): DynamoSerializer<Pick<T, P>, Pick<S, P>> {
+        return new DynamoSerializer(undefined as any, () => keys.reduce((serializers, key) => {
+            serializers[key] = this.serializers[key];
+            return serializers;
+        }, {} as any), (value) => value as Pick<T, P>);
+    }
+
     private get fields(): Field<T>[] {
         return Object.keys(this.serializers) as unknown as Field<T>[];
     }

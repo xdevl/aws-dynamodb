@@ -26,12 +26,13 @@ async function *chunksOf<T>(values: AsyncGenerator<T>, chunkSize: number): Async
 
 type SerializedType<T extends DynamoSerializer<any, any>> = T extends DynamoSerializer<infer T, any> ? T : never;
 type SerializerType<T extends DynamoSerializer<any, any>> = T extends DynamoSerializer<any, infer T> ? T : never;
-type Indexable<T extends DynamoSerializer<any, any>> = keyof SerializedType<T> & Field<SerializerType<T>, IDynamoSerializer<any, "S"> | IDynamoSerializer<any, "N">>;
+type Indexable<T extends DynamoSerializer<any, any>> = IsStrictlyAny<T> extends false ? keyof SerializedType<T> & Field<SerializerType<T>, IDynamoSerializer<any, "S"> | IDynamoSerializer<any, "N">> : any;
 type SortKeySpec<T extends DynamoSerializer<any, any>, PK extends Indexable<T>> = IsStrictlyAny<PK> extends false ? Exclude<Indexable<T>, PK> : Indexable<T>;
 type KeySpec<T extends DynamoSerializer<any, any>, PK extends Indexable<T>, SK extends SortKeySpec<T, PK>> = PK | [PK, SK];
 // see: https://stackoverflow.com/questions/53984650/typescript-never-type-inconsistently-matched-in-conditional-type
 type KeyType<T extends DynamoSerializer<any, any>, PK extends Indexable<T>, SK extends SortKeySpec<T, PK>> = [SK] extends [never] ? SerializedType<T>[PK] : [SerializedType<T>[PK], SerializedType<T>[SK]];
-
+// TODO: the serializer type should be set to Pick<SerializerType<T>, P> rather than SerializerType<T>
+type Projection<T extends DynamoSerializer<any, any>, P extends keyof SerializerType<T>> = DynamoSerializer<Pick<SerializedType<T>, P>, SerializerType<T>>;
 
 type Matcher = "=" | "<" | "<=" | ">" | ">=" | "between" | "begins_with";
 
@@ -71,7 +72,7 @@ export class DynamoIndex<T extends DynamoSerializer<any, any>, PK extends Indexa
 
     readonly keySchema: DynamoDB.KeySchema;
 
-    constructor(readonly tableName: string, readonly serializer: T, readonly keyspec: KeySpec<T, PK, SK>, readonly type = IndexType.GLOBAL, readonly name?: string) {
+    constructor(readonly tableName: string, readonly serializer: T, readonly keyspec: KeySpec<T, PK, SK>, readonly type = IndexType.GLOBAL, readonly projection?: string[], readonly name?: string) {
         this.keySchema = arrayable(this.keyspec).map((name, index) => ({
             AttributeName: name as string, KeyType: index == 0 ? "HASH" : "RANGE"
         }));
@@ -180,16 +181,26 @@ export class DynamoDao<T extends DynamoSerializer<any, any>, PK extends Indexabl
         await dynamoDb.deleteItem({ Key: this.dynamoDbKey(key), TableName: this.tableName}).promise();
     }
 
-    public localIndex<I extends SortKeySpec<T, PK>>(name: string, spec: I): DynamoIndex<T, PK, I>{
+    public localIndex<P extends keyof SerializerType<T>, I extends SortKeySpec<T, PK>>(name: string, spec: I, projection?: P[]): DynamoIndex<Projection<T, PK | SK | I | P>, PK, I> {
         const pk = this.keyspec instanceof Array ? this.keyspec[0] : this.keyspec;
-        return new DynamoIndex(this.tableName, this.serializer, [pk, spec], IndexType.LOCAL, name);
+        const keys = (arrayable(this.keyspec) as string[]).concat(spec as string);
+        const sanitizedProjection = ((projection ?? Object.keys(this.serializer.serializers)) as string[]).filter((name) => keys.indexOf(name) < 0);
+        const serializer = this.serializer.subSerializer(sanitizedProjection.concat(...keys));
+
+        return new DynamoIndex(this.tableName, serializer as any, [pk, spec], IndexType.LOCAL, projection ? sanitizedProjection : undefined, name);
     }
 
-    public globalIndex<IPK extends Indexable<T>, ISK extends SortKeySpec<T, IPK> = never>(name: string, spec: KeySpec<T, IPK, ISK>): DynamoIndex<T, IPK, ISK> {
-        return new DynamoIndex(this.tableName, this.serializer, spec, IndexType.GLOBAL, name);
+
+    public globalIndex<P extends keyof SerializerType<T>, IPK extends Indexable<T>, ISK extends SortKeySpec<T, IPK> = never>(name: string, spec: KeySpec<T, IPK, ISK>, projection?: P[]):
+            DynamoIndex<Projection<T, PK | SK | IPK | ISK | P>, IPK, ISK> {
+        const keys = (arrayable(this.keyspec) as string[]).concat(...arrayable(spec) as string[]);
+        const sanitizedProjection = ((projection ?? Object.keys(this.serializer.serializers)) as string[]).filter((name) => keys.indexOf(name) < 0);
+        const serializer = this.serializer.subSerializer(sanitizedProjection.concat(...keys));
+
+        return new DynamoIndex(this.tableName, serializer as any, spec, IndexType.GLOBAL, projection ? sanitizedProjection : undefined, name);
     }
 
-    public async createTableIfNeeded(dynamoDb: DynamoDB, throughput: DynamoDB.ProvisionedThroughput, ...indexes: DynamoIndex<T, any, any>[]): Promise<void> {
+    public async createTableIfNeeded(dynamoDb: DynamoDB, throughput: DynamoDB.ProvisionedThroughput, ...indexes: DynamoIndex<any, any, any>[]): Promise<void> {
         const spec = this.buildTableSpec(throughput, ...indexes);
         const tableParam = {TableName: spec.TableName};
         try {
@@ -215,7 +226,7 @@ export class DynamoDao<T extends DynamoSerializer<any, any>, PK extends Indexabl
         return this.serializer.typeOf(field)!;
     }
 
-    public buildTableSpec(throughput: DynamoDB.ProvisionedThroughput, ...indexes: DynamoIndex<T, any, any>[]): DynamoDB.CreateTableInput {
+    public buildTableSpec(throughput: DynamoDB.ProvisionedThroughput, ...indexes: DynamoIndex<any, any, any>[]): DynamoDB.CreateTableInput {
         const attributes = new Set<string>();
         arrayable(this.keyspec).forEach((attribute) => attributes.add(attribute as string));
         indexes.forEach((index) => arrayable(index.keyspec).forEach((attribute) => attributes.add(attribute as string)));
@@ -229,12 +240,18 @@ export class DynamoDao<T extends DynamoSerializer<any, any>, PK extends Indexabl
             LocalSecondaryIndexes: localIndexes.length < 1 ? undefined : localIndexes.map((index) => ({
                 IndexName: index.name ?? arrayable(index.keyspec).join("_"),
                 KeySchema: index.keySchema,
-                Projection: { ProjectionType: "ALL" }
+                Projection: {
+                    ProjectionType: index.projection ? (index.projection.length > 0 ? "INCLUDE" : "KEYS_ONLY") : "ALL",
+                    NonKeyAttributes: index.projection?.length ?? 0 > 0 ? index.projection : undefined
+                }
             })),
             GlobalSecondaryIndexes: globalIndexes.length < 1 ? undefined : globalIndexes.map((index) => ({
                 IndexName: index.name ?? arrayable(index.keyspec).join("_"),
                 KeySchema: index.keySchema,
-                Projection: { ProjectionType: "ALL" },
+                Projection: {
+                    ProjectionType: index.projection ? (index.projection.length > 0 ? "INCLUDE" : "KEYS_ONLY") : "ALL",
+                    NonKeyAttributes: index.projection?.length ?? 0 > 0 ? index.projection : undefined
+                },
                 ProvisionedThroughput: throughput
             })),
             ProvisionedThroughput: throughput,
