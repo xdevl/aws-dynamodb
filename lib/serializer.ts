@@ -11,6 +11,14 @@ import {Field, Initializer, Type, typeOf} from "./utils";
 type DynamoType<K extends keyof DynamoDB.AttributeValue> = NonNullable<DynamoDB.AttributeValue[K]>;
 type DynamoRecord<K extends keyof DynamoDB.AttributeValue> = Record<K, DynamoType<K>>;
 
+export class SerializationError extends Error {
+    constructor(msg: string, public readonly cause: any) {
+      super(msg);
+      this.name = "SerializationError";
+      Object.setPrototypeOf(this, SerializationError.prototype);
+    }
+  }
+
 export interface IDynamoSerializer<T, K extends keyof DynamoDB.AttributeValue> {
     type: K
     deserialize: (value: DynamoRecord<K>) => T;
@@ -46,7 +54,12 @@ type DynamoSerializers<T> = {
     [P in Field<T>]: IDynamoSerializer<T[P], any> | undefined;
 };
 
-// TODO: enhance error messages, ie: when a field fails to serialize / deserialize log its name and potentially dump the whole payload
+type Impossible<K extends keyof any> = {
+    [P in K]: never;
+};
+  
+type NoExtraProperties<T, U extends T = T> = U & Impossible<Exclude<keyof U, Field<T>>>;
+
 export class DynamoSerializer<T, S extends DynamoSerializers<T>> implements IDynamoSerializer<T, "M"> {
 
     public static readonly boolean = (): IDynamoSerializer<boolean, "BOOL"> => DynamoRawSerializer.boolean;
@@ -97,7 +110,7 @@ export class DynamoSerializer<T, S extends DynamoSerializers<T>> implements IDyn
     public readonly type = "M";
     public readonly serializers: DynamoSerializers<T>;
 
-    constructor(type: Type<T>, serializers: (self: DynamoSerializer<T, any>) => S, private readonly factory: (attrs: Initializer<T>) => T) {
+    constructor(type: Type<T>, serializers: (self: DynamoSerializer<T, any>) => NoExtraProperties<DynamoSerializers<T>, S>, private readonly factory: (attrs: Initializer<T>) => T) {
         this.serializers = serializers(this);
     }
 
@@ -114,11 +127,19 @@ export class DynamoSerializer<T, S extends DynamoSerializers<T>> implements IDyn
     }
 
     public serializeField<F extends Field<T>>(field: F, value: T[F]): DynamoDB.AttributeValue | undefined {
-        return this.serializers[field]?.serialize(value);
+        try {
+            return this.serializers[field]?.serialize(value);
+        } catch (error) {
+            throw new SerializationError(`Failed to serialize field: ${field}`, error);
+        }
     }
 
     public deserializeField<F extends Field<T>>(field: F, value: DynamoDB.AttributeValue): T[F] | undefined {
-        return this.serializers[field]?.deserialize(value);
+        try {
+            return this.serializers[field]?.deserialize(value);
+        } catch (error) {
+            throw new SerializationError(`Failed to deserialize field: ${field}`, error);
+        }
     }
 
     public typeOf<F extends Field<T>>(field: F): keyof DynamoDB.AttributeValue | undefined {
