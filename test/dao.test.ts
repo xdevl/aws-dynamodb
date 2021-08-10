@@ -21,7 +21,7 @@ const productSerializer = new DynamoSerializer(typeOf<Product>(), () => ({
     price: DynamoSerializer.number()
 }), (attrs) => new Product(attrs));
 
-const dao = new DynamoDao("ProductTable", productSerializer, ["type", "code"]);
+const setupDao = (mock: any) => new DynamoDao(mock, "ProductTable", productSerializer, ["type", "code"]);
 
 const dynamock = <T extends string>(name: T, ...values: any[]) => {
     const mock = jest.fn();
@@ -30,14 +30,14 @@ const dynamock = <T extends string>(name: T, ...values: any[]) => {
 }
 
 test("Can list", async () => {
-    const mock = dynamock("scan", {
+    const dao = setupDao(dynamock("scan", {
         Items: [
             { type: {S: "soap"}, code: {N: "1"}, price: {N: "2.5"} },
             { type: {S: "chicken"}, code: {N: "2"}, price: {N: "7"} }
         ]
-    });
+    }));
 
-    const values = await collect(dao.list(mock as any));
+    const values = await collect(dao.list());
 
     expect(values).toStrictEqual([
         new Product({type: "soap", code: 1, price: 2.5}),
@@ -46,7 +46,7 @@ test("Can list", async () => {
 });
 
 test("Can list chunked result", async () => {
-    const mock = dynamock("scan", {
+    const dao = setupDao(dynamock("scan", {
         Items: [
             { type: {S: "soap"}, code: {N: "1"}, price: {N: "2.5"} },
         ],
@@ -55,9 +55,9 @@ test("Can list chunked result", async () => {
         Items: [
             { type: {S: "chicken"}, code: {N: "2"}, price: {N: "7"} }
         ]
-    });
+    }));
 
-    const values = await collect(dao.list(mock as any));
+    const values = await collect(dao.list());
 
     expect(values).toStrictEqual([
         new Product({type: "soap", code: 1, price: 2.5}),
@@ -67,8 +67,9 @@ test("Can list chunked result", async () => {
 
 test("Can persist", async () => {
     const mock = dynamock("batchWriteItem", {});
+    const dao = setupDao(mock);
 
-    await dao.persist(mock as any, generator(
+    await dao.persist(generator(
         new Product({type: "soap", code: 1, price: 2.5}),
         new Product({type: "chicken", code: 2, price: 7})
     ));
@@ -93,8 +94,9 @@ test("Can persist", async () => {
 
 test("Can lookup with primary key", async () => {
     const mock = dynamock("query", {});
+    const dao = setupDao(mock);
 
-    const values = await collect(dao.lookup(mock as any, "cucumber"));
+    const values = await collect(dao.lookup("cucumber"));
 
     expect(values).toStrictEqual([]);
     expect(mock.query).toBeCalledWith({
@@ -111,8 +113,9 @@ test("Can lookup with primary key", async () => {
 
 test("Can lookup with condition", async () => {
     const mock = dynamock("query", {});
+    const dao = setupDao(mock);
 
-    const values = await collect(dao.lookup(mock as any, "cheese", {
+    const values = await collect(dao.lookup("cheese", {
         condition: {matcher: "<", value: 0}
     }));
 
@@ -133,9 +136,10 @@ test("Can lookup with condition", async () => {
 
 test("Can lookup index", async () => {
     const mock = dynamock("query", {});
+    const dao = setupDao(mock);
     const priceIndex = dao.localIndex("priceIndex", "price");
 
-    const values = await collect(priceIndex.lookup(mock as any, "cheese", {
+    const values = await collect(priceIndex.lookup("cheese", {
         condition: {matcher: "between", value: [5, 10]}
     }));
 
@@ -158,8 +162,9 @@ test("Can lookup index", async () => {
 
 test("Can get", async () => {
     const mock = dynamock("getItem", {});
+    const dao = setupDao(mock);
 
-    const value = await dao.get(mock as any, ["tomatoe", 64]);
+    const value = await dao.get(["tomatoe", 64]);
 
     expect(value).toBeUndefined();
     expect(mock.getItem).toBeCalledWith({

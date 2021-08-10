@@ -72,23 +72,24 @@ export class DynamoIndex<T extends DynamoSerializer<any, any>, PK extends Indexa
 
     readonly keySchema: DynamoDB.KeySchema;
 
-    constructor(readonly tableName: string, readonly serializer: T, readonly keyspec: KeySpec<T, PK, SK>, readonly type = IndexType.GLOBAL, readonly projection?: string[], readonly name?: string) {
+    constructor(readonly dynamoDb: DynamoDB, readonly tableName: string, readonly serializer: T, readonly keyspec: KeySpec<T, PK, SK>,
+                readonly type = IndexType.GLOBAL, readonly projection?: string[], readonly name?: string) {
         this.keySchema = arrayable(this.keyspec).map((name, index) => ({
             AttributeName: name as string, KeyType: index == 0 ? "HASH" : "RANGE"
         }));
     }
 
-    public async *list(dynamoDb: DynamoDB, options?: ListOptions): AsyncGenerator<SerializedType<T>> {
+    public async *list(options?: ListOptions): AsyncGenerator<SerializedType<T>> {
         const overwrite = options?.overwrite ?? ((params: ScanInput) => params);
         yield *this.fetch(overwrite({
             TableName: this.tableName,
             IndexName: this.name,
             ExclusiveStartKey: options?.startFrom,
             Limit: options?.limit,
-        }), (params) => dynamoDb.scan(params).promise(), options?.onMore);
+        }), (params) => this.dynamoDb.scan(params).promise(), options?.onMore);
     }
 
-    public async *lookup<M extends Matcher>(dynamoDb: DynamoDB, partitionKey: SerializedType<T>[PK], options?: LookupOptions<T, SK, M>): AsyncGenerator<SerializedType<T>> {
+    public async *lookup<M extends Matcher>(partitionKey: SerializedType<T>[PK], options?: LookupOptions<T, SK, M>): AsyncGenerator<SerializedType<T>> {
         const overwrite = options?.overwrite ?? ((params: QueryInput) => params);
         const pkCondition = "#pk = :pk";
         yield *this.fetch(overwrite({
@@ -105,7 +106,7 @@ export class DynamoIndex<T extends DynamoSerializer<any, any>, PK extends Indexa
                 ...(options?.condition ? this.attributeValues(options.condition) : {} )
             },
             KeyConditionExpression: options?.condition ? `${pkCondition} and ${conditionToString(options.condition.matcher, "#sk")}` : pkCondition,
-        }), (params) => dynamoDb.query(params).promise(), options?.onMore);
+        }), (params) => this.dynamoDb.query(params).promise(), options?.onMore);
     }
 
     
@@ -159,26 +160,26 @@ export class DynamoIndex<T extends DynamoSerializer<any, any>, PK extends Indexa
 export class DynamoDao<T extends DynamoSerializer<any, any>, PK extends Indexable<T>, SK extends SortKeySpec<T, PK> = never>
     extends DynamoIndex<T, PK, SK> {
 
-    constructor(tableName: string, serializer: T, keyspec: KeySpec<T, PK, SK>) {
-        super(tableName, serializer, keyspec);
+    constructor(dynamoDb: DynamoDB, tableName: string, serializer: T, keyspec: KeySpec<T, PK, SK>) {
+        super(dynamoDb, tableName, serializer, keyspec);
     }
 
-    public async persist(dynamoDb: DynamoDB, entities: AsyncGenerator<SerializedType<T>>): Promise<void> {
+    public async persist(entities: AsyncGenerator<SerializedType<T>>): Promise<void> {
         for await (const chunk of chunksOf(entities, 25)) {
-            await dynamoDb.batchWriteItem({ RequestItems: { [this.tableName]: chunk.map((entity ) => ({
+            await this.dynamoDb.batchWriteItem({ RequestItems: { [this.tableName]: chunk.map((entity ) => ({
                 PutRequest: {Item: this.serializer.serialize(entity).M}})),
             }}).promise();
         }
     }
 
-    public async get(dynamoDb: DynamoDB, key: KeyType<T, PK, SK>): Promise<SerializedType<T>|undefined> {
-        const result = await dynamoDb.getItem({ Key: this.dynamoDbKey(key), TableName: this.tableName }).promise();
+    public async get(key: KeyType<T, PK, SK>): Promise<SerializedType<T>|undefined> {
+        const result = await this.dynamoDb.getItem({ Key: this.dynamoDbKey(key), TableName: this.tableName }).promise();
 
         return result.Item ? this.serializer.deserialize({M: result.Item}) : undefined;
     }
 
-    public async delete(dynamoDb: DynamoDB, key: KeyType<T, PK, SK>): Promise<void> {
-        await dynamoDb.deleteItem({ Key: this.dynamoDbKey(key), TableName: this.tableName}).promise();
+    public async delete(key: KeyType<T, PK, SK>): Promise<void> {
+        await this.dynamoDb.deleteItem({ Key: this.dynamoDbKey(key), TableName: this.tableName}).promise();
     }
 
     public localIndex<P extends keyof SerializerType<T>, I extends SortKeySpec<T, PK>>(name: string, spec: I, projection?: P[]): DynamoIndex<Projection<T, PK | SK | I | P>, PK, I> {
@@ -187,7 +188,7 @@ export class DynamoDao<T extends DynamoSerializer<any, any>, PK extends Indexabl
         const sanitizedProjection = ((projection ?? Object.keys(this.serializer.serializers)) as string[]).filter((name) => keys.indexOf(name) < 0);
         const serializer = this.serializer.subSerializer(sanitizedProjection.concat(...keys));
 
-        return new DynamoIndex(this.tableName, serializer as any, [pk, spec], IndexType.LOCAL, projection ? sanitizedProjection : undefined, name);
+        return new DynamoIndex(this.dynamoDb, this.tableName, serializer as any, [pk, spec], IndexType.LOCAL, projection ? sanitizedProjection : undefined, name);
     }
 
 
@@ -197,25 +198,25 @@ export class DynamoDao<T extends DynamoSerializer<any, any>, PK extends Indexabl
         const sanitizedProjection = ((projection ?? Object.keys(this.serializer.serializers)) as string[]).filter((name) => keys.indexOf(name) < 0);
         const serializer = this.serializer.subSerializer(sanitizedProjection.concat(...keys));
 
-        return new DynamoIndex(this.tableName, serializer as any, spec, IndexType.GLOBAL, projection ? sanitizedProjection : undefined, name);
+        return new DynamoIndex(this.dynamoDb, this.tableName, serializer as any, spec, IndexType.GLOBAL, projection ? sanitizedProjection : undefined, name);
     }
 
-    public async createTableIfNeeded(dynamoDb: DynamoDB, throughput: DynamoDB.ProvisionedThroughput, ...indexes: DynamoIndex<any, any, any>[]): Promise<void> {
+    public async createTableIfNeeded(throughput: DynamoDB.ProvisionedThroughput, ...indexes: DynamoIndex<any, any, any>[]): Promise<void> {
         const spec = this.buildTableSpec(throughput, ...indexes);
         const tableParam = {TableName: spec.TableName};
         try {
-            const status = await dynamoDb.describeTable(tableParam).promise();
+            const status = await this.dynamoDb.describeTable(tableParam).promise();
             if (status.Table && status.Table.TableStatus === "ACTIVE") {
                 return;
             }
         } catch(error) {
             if (error.name === "ResourceNotFoundException") {
-                await dynamoDb.createTable(spec).promise();
+                await this.dynamoDb.createTable(spec).promise();
             } else {
                 throw error;
             }
         }
-        await dynamoDb.waitFor("tableExists", tableParam).promise();
+        await this.dynamoDb.waitFor("tableExists", tableParam).promise();
     }
 
     private dynamoDbKey(key: KeyType<T, PK, SK>): DynamoDB.Key {

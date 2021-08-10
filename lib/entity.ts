@@ -34,11 +34,10 @@ export class EntityDao<T> {
     private readonly dao: DynamoDao<DynamoSerializer<Entity<T>, any>, "ENTITY_TYPE", "ENTITY_ID">;
     private readonly lookupIndex: DynamoIndex<DynamoSerializer<Entity<T>, any>, "ENTITY_TYPE", "ENTITY_LOOKUP">
 
-    constructor(private readonly dynamoDb: DynamoDB, private readonly entityType: string,
-                private readonly id: (value: T) => string, private readonly lookup: (value: T) => string,
-                tableName: string, serializer: DynamoSerializer<T, any>) {
+    constructor(dynamoDb: DynamoDB, tableName: string, serializer: DynamoSerializer<T, any>, private readonly entityType: string,
+                private readonly id: (value: T) => string, private readonly lookup: (value: T) => string) {
 
-        this.dao = new DynamoDao(tableName, new DynamoSerializer (typeOf<Entity<any>>(), () => ({
+        this.dao = new DynamoDao(dynamoDb, tableName, new DynamoSerializer (typeOf<Entity<any>>(), () => ({
                 ENTITY_ID: DynamoSerializer.string(),
                 ENTITY_LOOKUP: DynamoSerializer.string(),
                 ENTITY_TYPE: DynamoSerializer.string(),
@@ -49,23 +48,23 @@ export class EntityDao<T> {
     }
 
     public async persist(entities: AsyncGenerator<T>): Promise<void> {
-        return this.dao.persist(this.dynamoDb, map(entities, (entity) => this.wrap(entity)));
+        return this.dao.persist(map(entities, (entity) => this.wrap(entity)));
     }
 
     public async *list(lookup?: string): AsyncGenerator<T> {
-        yield *map(this.lookupIndex.lookup(this.dynamoDb, this.entityType, {
+        yield *map(this.lookupIndex.lookup(this.entityType, {
             condition: lookup ? {matcher: "begins_with", value: lookup} : undefined,
             overwrite: (input) => ({...input, ScanIndexForward: false})
         }), (entity) => entity.ENTITY_VALUE);
     }
 
     public async get(keyValue: string): Promise<T | undefined> {
-        return this.dao.get(this.dynamoDb, [this.entityType, keyValue])
+        return this.dao.get([this.entityType, keyValue])
             .then((entity) => entity ? entity.ENTITY_VALUE : undefined);
     }
 
     public delete(keyValue: string): Promise<void> {
-        return this.dao.delete(this.dynamoDb, [this.entityType, keyValue]);
+        return this.dao.delete([this.entityType, keyValue]);
     }
 
     private wrap(value: T): Entity<T> {
@@ -73,8 +72,8 @@ export class EntityDao<T> {
     }
 
     public static synchronise(tableName: string, dynamoDb: DynamoDB, throughput?: DynamoDB.ProvisionedThroughput): Promise<void> {
-        const template = new EntityDao<undefined>(dynamoDb, "", () => "", () => "", tableName, new DynamoSerializer(typeOf<undefined>(), () => ({}), () => undefined));
-        return template.dao.createTableIfNeeded(dynamoDb, throughput || {
+        const template = new EntityDao<undefined>(dynamoDb, tableName, new DynamoSerializer(typeOf<undefined>(), () => ({}), () => undefined), "", () => "", () => "");
+        return template.dao.createTableIfNeeded(throughput || {
                 ReadCapacityUnits: 1,
                 WriteCapacityUnits: 1,
             }, template.lookupIndex);
