@@ -27,7 +27,7 @@ const userSerializer = new DynamoSerializer(typeOf<User>(), (self) => ({
     surname: DynamoSerializer.string(),
     firstNames: DynamoSerializer.list(DynamoSerializer.string()),
     dateOfBirth: DynamoSerializer.date(),
-    gender: DynamoSerializer.enum<Gender>(),
+    gender: DynamoSerializer.string<Gender>(),
     mentor: DynamoSerializer.optional(self),
     rightHanded: DynamoSerializer.boolean(),
 }), (attrs) => new User(attrs));

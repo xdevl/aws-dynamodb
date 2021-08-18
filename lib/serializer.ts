@@ -76,8 +76,6 @@ export class DynamoSerializer<T, S extends DynamoSerializers<T>> implements IDyn
         serialize: (value) => DynamoSerializer.number().serialize(value.getTime()),
     })
 
-    public static readonly enum = <T extends {[P in keyof T]: string}>():
-            IDynamoSerializer<T, "S"> => DynamoRawSerializer.string as any
 
     public static list = <T>(serializer: IDynamoSerializer<T, any>): IDynamoSerializer<T[], "L"> => ({
         type: "L",
@@ -99,7 +97,7 @@ export class DynamoSerializer<T, S extends DynamoSerializers<T>> implements IDyn
         serialize: (value) => value === undefined ? DynamoRawSerializer.null.serialize(true) : serializer.serialize(value),
     })
 
-    public static readonly string = (): IDynamoSerializer<string, "S"> => DynamoRawSerializer.string;
+    public static readonly string = <T extends string>(): IDynamoSerializer<T, "S"> => DynamoRawSerializer.string as any;
 
     public static readonly stringSet = (): IDynamoSerializer<string[], "SS"> => DynamoRawSerializer.stringSet;
 
