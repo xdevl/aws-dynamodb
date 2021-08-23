@@ -51,7 +51,7 @@ const conditionToString = (matcher: Matcher, name: string) => {
     }
 }
 
-interface BaseOptions<T> {
+export interface BaseOptions<T> {
     overwrite?: (input: T) => T,
     limit?: number,
     onMore?: (resumeToken: any) => void,

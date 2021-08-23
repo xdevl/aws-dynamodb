@@ -7,8 +7,13 @@
 
 import {DynamoDB} from "aws-sdk";
 import {Initializer, map, typeOf} from "./utils";
-import {DynamoDao, DynamoIndex} from "./dao";
+import {BaseOptions, DynamoDao, DynamoIndex} from "./dao";
 import {DynamoSerializer} from "./serializer";
+import {QueryInput} from "aws-sdk/clients/dynamodb";
+
+interface ListOptions extends BaseOptions<QueryInput> {
+    lookup?: string;
+}
 
 class Entity<T> {
 
@@ -51,10 +56,11 @@ export class EntityDao<T> {
         return this.dao.persist(map(entities, (entity) => this.wrap(entity)));
     }
 
-    public async *list(lookup?: string): AsyncGenerator<T> {
+    public async *list(options?: ListOptions): AsyncGenerator<T> {
+        const {lookup, ...lookupOptions} = options ?? {};
         yield *map(this.lookupIndex.lookup(this.entityType, {
             condition: lookup ? {matcher: "begins_with", value: lookup} : undefined,
-            overwrite: (input) => ({...input, ScanIndexForward: false})
+            ...lookupOptions
         }), (entity) => entity.ENTITY_VALUE);
     }
 
@@ -71,7 +77,7 @@ export class EntityDao<T> {
         return Entity.create(this.entityType, this.id(value), this.lookup(value), value);
     }
 
-    public static synchronise(tableName: string, dynamoDb: DynamoDB, throughput?: DynamoDB.ProvisionedThroughput): Promise<void> {
+    public static synchronise(dynamoDb: DynamoDB, tableName: string, throughput?: DynamoDB.ProvisionedThroughput): Promise<void> {
         const template = new EntityDao<undefined>(dynamoDb, tableName, new DynamoSerializer(typeOf<undefined>(), () => ({}), () => undefined), "", () => "", () => "");
         return template.dao.createTableIfNeeded(throughput || {
                 ReadCapacityUnits: 1,
