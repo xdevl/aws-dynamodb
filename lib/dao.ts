@@ -10,6 +10,8 @@ import {Field, IsStrictlyAny} from "./utils";
 import {DynamoSerializer, IDynamoSerializer} from "./serializer";
 import {ExpressionAttributeValueMap, QueryInput, QueryOutput, ScanInput, ScanOutput} from "aws-sdk/clients/dynamodb";
 
+const prefix = (name: string) => `dynamo_${name}`
+
 const arrayable = <T>(value: T | T[]): T[] => value instanceof Array ? value : [value];
 
 async function *chunksOf<T>(values: AsyncGenerator<T>, chunkSize: number): AsyncGenerator<T[]> {
@@ -43,11 +45,11 @@ interface Condition<T extends DynamoSerializer<any, any>, K extends Indexable<T>
 
 const conditionToString = (matcher: Matcher, name: string) => {
     if (matcher === "begins_with") {
-        return `begins_with(${name}, :value)`;
+        return `begins_with(${name}, :${prefix("value")})`;
     } else if (matcher === "between") {
-        return `${name} between :from and :to`;
+        return `${name} between :${prefix("from")} and :${prefix("to")}`;
     } else {
-        return `${name} ${matcher} :value`;
+        return `${name} ${matcher} :${prefix("value")}`;
     }
 }
 
@@ -91,21 +93,21 @@ export class DynamoIndex<T extends DynamoSerializer<any, any>, PK extends Indexa
 
     public async *lookup<M extends Matcher>(partitionKey: SerializedType<T>[PK], options?: LookupOptions<T, SK, M>): AsyncGenerator<SerializedType<T>> {
         const overwrite = options?.overwrite ?? ((params: QueryInput) => params);
-        const pkCondition = "#pk = :pk";
+        const pkCondition = `#${prefix("pk")} = :${prefix("pk")}`;
         yield *this.fetch(overwrite({
             TableName: this.tableName,
             IndexName: this.name,
             ExclusiveStartKey: options?.startFrom,
             Limit: options?.limit,
             ExpressionAttributeNames: {
-                "#pk": this.partitionKey() as string,
-                ...(options?.condition ? {"#sk": this.sortKey() as string} : {})
+                [`#${prefix("pk")}`]: this.partitionKey() as string,
+                ...(options?.condition ? {[`#${prefix("sk")}`]: this.sortKey() as string} : {})
             },
             ExpressionAttributeValues: {
-                ":pk":  this.serializeValue(this.partitionKey(), partitionKey),
+                [`:${prefix("pk")}`]:  this.serializeValue(this.partitionKey(), partitionKey),
                 ...(options?.condition ? this.attributeValues(options.condition) : {} )
             },
-            KeyConditionExpression: options?.condition ? `${pkCondition} and ${conditionToString(options.condition.matcher, "#sk")}` : pkCondition,
+            KeyConditionExpression: options?.condition ? `${pkCondition} and ${conditionToString(options.condition.matcher, `#${prefix("sk")}`)}` : pkCondition,
         }), (params) => this.dynamoDb.query(params).promise(), options?.onMore);
     }
 
@@ -149,10 +151,10 @@ export class DynamoIndex<T extends DynamoSerializer<any, any>, PK extends Indexa
         const between = condition as Condition<T, SK, "between">;
         const notBetween = condition as Condition<T, SK, Exclude<M, "between">>;
         return condition.matcher === "between" ? {
-            ":from": this.serializeValue(this.sortKey(), between.value[0]),
-            ":to": this.serializeValue(this.sortKey(), between.value[1])
+            [`:${prefix("from")}`]: this.serializeValue(this.sortKey(), between.value[0]),
+            [`:${prefix("to")}`]: this.serializeValue(this.sortKey(), between.value[1])
         } : {
-            ":value": this.serializeValue(this.sortKey(), notBetween.value)
+            [`:${prefix("value")}`]: this.serializeValue(this.sortKey(), notBetween.value)
         };
     }
 }

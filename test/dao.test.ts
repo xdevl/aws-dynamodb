@@ -101,12 +101,12 @@ test("Can lookup with primary key", async () => {
     expect(values).toStrictEqual([]);
     expect(mock.query).toBeCalledWith({
         ExpressionAttributeNames: {
-            "#pk": "type"
+            "#dynamo_pk": "type"
         },
         ExpressionAttributeValues: {
-            ":pk": {"S": "cucumber"}
+            ":dynamo_pk": {"S": "cucumber"}
         },
-        KeyConditionExpression: "#pk = :pk",
+        KeyConditionExpression: "#dynamo_pk = :dynamo_pk",
         TableName: "ProductTable",
     });    
 });
@@ -122,14 +122,14 @@ test("Can lookup with condition", async () => {
     expect(values).toStrictEqual([]);
     expect(mock.query).toBeCalledWith({
         ExpressionAttributeNames: {
-            "#pk": "type",
-            "#sk": "code"
+            "#dynamo_pk": "type",
+            "#dynamo_sk": "code"
         },
         ExpressionAttributeValues: {
-            ":pk": {"S": "cheese"},
-            ":value": {"N": "0"}
+            ":dynamo_pk": {"S": "cheese"},
+            ":dynamo_value": {"N": "0"}
         },
-        KeyConditionExpression: "#pk = :pk and #sk < :value",
+        KeyConditionExpression: "#dynamo_pk = :dynamo_pk and #dynamo_sk < :dynamo_value",
         TableName: "ProductTable",
     });    
 });
@@ -146,16 +146,16 @@ test("Can lookup index", async () => {
     expect(values).toStrictEqual([]);
     expect(mock.query).toBeCalledWith({
         ExpressionAttributeNames: {
-            "#pk": "type",
-            "#sk": "price"
+            "#dynamo_pk": "type",
+            "#dynamo_sk": "price"
         },
         ExpressionAttributeValues: {
-            ":pk": {"S": "cheese"},
-            ":from": {"N": "5"},
-            ":to": {"N": "10"}
+            ":dynamo_pk": {"S": "cheese"},
+            ":dynamo_from": {"N": "5"},
+            ":dynamo_to": {"N": "10"}
         },
         IndexName: "priceIndex",
-        KeyConditionExpression: "#pk = :pk and #sk between :from and :to",
+        KeyConditionExpression: "#dynamo_pk = :dynamo_pk and #dynamo_sk between :dynamo_from and :dynamo_to",
         TableName: "ProductTable",
     });    
 });
