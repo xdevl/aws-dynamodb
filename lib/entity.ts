@@ -49,7 +49,7 @@ export class EntityDao<T> {
                 ENTITY_VALUE: serializer,
             }), (attrs) => new Entity(attrs)), ["ENTITY_TYPE", "ENTITY_ID"]);
 
-        this.lookupIndex = this.dao.localIndex("lookup", "ENTITY_LOOKUP");
+        this.lookupIndex = this.dao.localIndex("ENTITY_LOOKUP", "ENTITY_LOOKUP");
     }
 
     public async persist(entities: AsyncGenerator<T>): Promise<void> {
