@@ -15,17 +15,17 @@ const prefix = (name: string) => `dynamo_${name}`
 const arrayable = <T>(value: T | T[]): T[] => value instanceof Array ? value : [value];
 
 async function *chunksOf<T>(values: AsyncGenerator<T>, chunkSize: number): AsyncGenerator<T[]> {
-    let chunk = [];
-    for await (const value of values) {
-        if (chunk.length === chunkSize && chunkSize > 0) {
-            yield chunk;
-            chunk = [];
-        }
-        chunk.push(value);
+    const chunk = [];
+    let next;
+    while((chunkSize == 0 || chunk.length < chunkSize) && !(next = await values.next()).done) {
+        chunk.push(next.value);
     }
-    yield chunk;
+    if (chunk.length > 0) {
+        yield chunk;
+        yield *chunksOf(values, chunkSize);
+    }
 }
-
+    
 type SerializedType<T extends DynamoSerializer<any, any>> = T extends DynamoSerializer<infer T, any> ? T : never;
 type SerializerType<T extends DynamoSerializer<any, any>> = T extends DynamoSerializer<any, infer T> ? T : never;
 type Indexable<T extends DynamoSerializer<any, any>> = IsStrictlyAny<T> extends false ? keyof SerializedType<T> & Field<SerializerType<T>, IDynamoSerializer<any, "S"> | IDynamoSerializer<any, "N">> : any;
