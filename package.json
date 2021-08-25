@@ -10,8 +10,13 @@
     "start": "node .",
     "test": "jest"
   },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/xdevl/node-dynamodb-dao.git"
+  },
   "keywords": [
     "dynamodb",
+    "dao",
     "db",
     "aws",
     "typescript"
@@ -19,7 +24,7 @@
   "author": "xdevl",
   "license": "MIT",
   "dependencies": {
-    "aws-sdk": "^2.950.0"
+    "aws-sdk": "^2.975.0"
   },
   "devDependencies": {
     "@types/jest": "^26.0.23",
